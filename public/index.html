@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeadlineRadar</title>
+<style>
+  :root { --bg:#0f1220; --card:#181c30; --text:#e8eaf6; --muted:#9aa0c3; --accent:#7c9cff; --late:#ff6b81; --soon:#ffb547; --ok:#4cd6a0; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:820px; margin:0 auto; padding:32px 16px 64px; }
+  h1 { margin:0; font-size:2rem; } h1 span { color:var(--accent); }
+  .tag { color:var(--muted); margin:4px 0 24px; }
+  textarea { width:100%; min-height:180px; padding:14px; border-radius:12px; border:1px solid #2b3150; background:var(--card); color:var(--text); font:inherit; resize:vertical; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin:12px 0 24px; }
+  button { padding:10px 18px; border:0; border-radius:10px; font:inherit; font-weight:600; cursor:pointer; background:var(--accent); color:#0f1220; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  select { padding:9px; border-radius:10px; background:var(--card); color:var(--text); border:1px solid #2b3150; font:inherit; }
+  .muted { color:var(--muted); font-size:.9rem; }
+  .card { background:var(--card); border-radius:14px; padding:16px 18px; margin-bottom:12px; border-left:5px solid var(--ok); }
+  .card.late { border-color:var(--late); } .card.soon { border-color:var(--soon); }
+  .card h3 { margin:0 0 6px; font-size:1.05rem; }
+  .when { font-size:1.2rem; font-weight:700; }
+  .count { font-weight:700; } .late .count { color:var(--late); } .soon .count { color:var(--soon); } .card:not(.late):not(.soon) .count { color:var(--ok); }
+  .quote { color:var(--muted); font-size:.85rem; margin-top:6px; }
+  #err { color:var(--late); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Deadline<span>Radar</span></h1>
+  <p class="tag">Paste any messy announcement — course email, hackathon rules, event page. Get every deadline in <b>your</b> time zone, with a live countdown and a calendar file.</p>
+
+  <textarea id="text" placeholder="e.g. Submission Period: September 22, 2026 (10:00 am Eastern Time) – October 26, 2026 (5:00 pm ET)"></textarea>
+  <div class="row">
+    <button id="go">Find deadlines</button>
+    <button class="ghost" id="sample">Try a sample</button>
+    <label class="muted">Show in <select id="tz"></select></label>
+  </div>
+  <p id="err"></p>
+  <div id="out"></div>
+  <div class="row" id="actions" hidden>
+    <button id="ics">Download .ics (all)</button>
+    <span class="muted" id="engine"></span>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const SAMPLE = `Build With AI Hackathon — all times ET
+Registration closes October 26, 2026 at 5:00 pm ET
+Submission deadline: Oct 26, 2026 5:00 pm ET
+Judging Period: October 27, 2026 10:00 am ET
+Winners announced: Nov 4, 2026 2:00 pm ET
+Office hours: Tue Oct 13, 2026 3:00 pm ET (Discord)`;
+
+const zones = ["Asia/Ho_Chi_Minh","America/New_York","America/Los_Angeles","Europe/London","Europe/Berlin","Asia/Kolkata","Asia/Tokyo","Australia/Sydney","UTC"];
+const mine = Intl.DateTimeFormat().resolvedOptions().timeZone;
+if (!zones.includes(mine)) zones.unshift(mine);
+$("tz").innerHTML = zones.map((z) => `<option ${z === mine ? "selected" : ""}>${z}</option>`).join("");
+
+let items = [];
+
+function countdown(ms) {
+  const past = ms < 0; ms = Math.abs(ms);
+  const d = Math.floor(ms / 864e5), h = Math.floor(ms / 36e5) % 24, m = Math.floor(ms / 6e4) % 60;
+  const s = (d ? d + "d " : "") + h + "h " + m + "m";
+  return past ? "Passed " + s + " ago" : "in " + s;
+}
+
+function render() {
+  const tz = $("tz").value, now = Date.now();
+  const fmt = new Intl.DateTimeFormat("en-GB", { timeZone: tz, weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+  $("out").innerHTML = items.length ? items
+    .slice().sort((a, b) => new Date(a.datetime_utc) - new Date(b.datetime_utc))
+    .map((it) => {
+      const t = new Date(it.datetime_utc), diff = t - now;
+      const cls = diff < 0 ? "late" : diff < 48 * 36e5 ? "soon" : "";
+      return `<div class="card ${cls}"><h3>${esc(it.title)}</h3>
+        <div class="when">${fmt.format(t)}</div>
+        <div class="count">${countdown(diff)}</div>
+        <div class="quote">Source: “${esc(it.quote)}” (${esc(it.source_timezone)})</div></div>`;
+    }).join("") : `<p class="muted">No deadlines found. Try including a date like “Oct 26, 5pm ET”.</p>`;
+  $("actions").hidden = !items.length;
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c])); }
+
+async function run() {
+  $("err").textContent = ""; $("go").textContent = "Scanning…"; $("go").disabled = true;
+  try {
+    const r = await fetch("/api/extract", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: $("text").value }) });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error);
+    items = data.deadlines;
+    $("engine").textContent = data.engine === "claude" ? "Extracted by Claude" : "Extracted by offline parser (set ANTHROPIC_API_KEY for AI mode)";
+    render();
+  } catch (e) { $("err").textContent = e.message; }
+  finally { $("go").textContent = "Find deadlines"; $("go").disabled = false; }
+}
+
+function icsDate(d) { return d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, ""); }
+function downloadIcs() {
+  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//DeadlineRadar//EN"];
+  items.forEach((it, i) => {
+    const t = new Date(it.datetime_utc);
+    lines.push("BEGIN:VEVENT", `UID:${Date.now()}-${i}@deadlineradar`, `DTSTAMP:${icsDate(new Date())}`,
+      `DTSTART:${icsDate(t)}`, `DTEND:${icsDate(t)}`, `SUMMARY:${it.title.replace(/[,;]/g, "\\$&")}`,
+      `DESCRIPTION:${it.quote.replace(/[,;]/g, "\\$&")}`,
+      "BEGIN:VALARM", "TRIGGER:-PT24H", "ACTION:DISPLAY", "DESCRIPTION:Deadline in 24h", "END:VALARM",
+      "BEGIN:VALARM", "TRIGGER:-PT1H", "ACTION:DISPLAY", "DESCRIPTION:Deadline in 1h", "END:VALARM", "END:VEVENT");
+  });
+  lines.push("END:VCALENDAR");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lines.join("\r\n")], { type: "text/calendar" }));
+  a.download = "deadlines.ics"; a.click();
+}
+
+$("go").onclick = run;
+$("sample").onclick = () => { $("text").value = SAMPLE; run(); };
+$("tz").onchange = render;
+$("ics").onclick = downloadIcs;
+setInterval(() => items.length && render(), 30000);
+</script>
+</body>
+</html>
